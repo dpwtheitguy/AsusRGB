@@ -1,7 +1,3 @@
-cd ~/Documents/AsusRGB || exit 1
-mkdir -p .github/workflows
-
-cat > .github/workflows/build-deb.yml <<'WORKFLOW'
 name: Build AsusRGB DEB
 
 on:
