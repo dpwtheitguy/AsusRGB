@@ -1,0 +1,209 @@
+cd ~/Documents/AsusRGB || exit 1
+mkdir -p .github/workflows
+
+cat > .github/workflows/build-deb.yml <<'WORKFLOW'
+name: Build AsusRGB DEB
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            debhelper build-essential cmake pkg-config git curl \
+            libclang-dev libudev-dev libfontconfig1-dev \
+            libxkbcommon-dev libssl-dev libasound2-dev \
+            libfreetype6-dev libexpat1-dev libxcb-composite0-dev \
+            libx11-dev libseat-dev libinput-dev libgbm-dev \
+            libwayland-dev libgtk-3-dev libsystemd-dev \
+            libpcre2-dev libzstd-dev gettext
+
+      - name: Prepare Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Fetch pinned upstream source
+        run: |
+          git init upstream
+          cd upstream
+          git remote add origin https://github.com/OpenGamingCollective/asusctl.git
+          git fetch --depth 1 origin 15664e8e9177d54de57e9321f6baf972b9113712
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = \
+            "15664e8e9177d54de57e9321f6baf972b9113712"
+
+      - name: Prepare Debian packaging
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p debian/source
+
+          cat > debian/control <<'CONTROL'
+          Source: asusrgb
+          Section: utils
+          Priority: optional
+          Maintainer: AsusRGB Community <noreply@github.com>
+          Build-Depends: debhelper-compat (= 13)
+          Standards-Version: 4.6.2
+          Rules-Requires-Root: no
+          Homepage: https://github.com/dpwtheitguy/AsusRGB
+
+          Package: asusrgb
+          Architecture: amd64
+          Depends: ${shlibs:Depends}, ${misc:Depends}, libegl1, libgl1, libvulkan1, libfontconfig1, libxkbcommon0, libwayland-client0, dbus, udev
+          Conflicts: asusctl, asusd, rog-control-center, asusctl-rog-gui
+          Description: ASUS laptop controls and ROG Control Center
+           Community packaging of upstream asusctl, asusd and
+           ROG Control Center for Ubuntu and Pop!_OS 24.04.
+           Hardware support varies by laptop model.
+          CONTROL
+
+          VERSION="6.5.0-1"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          dpkg --validate-version "$VERSION"
+
+          cat > debian/changelog <<CHANGELOG
+          asusrgb ($VERSION) noble; urgency=medium
+
+            * Package upstream commit 15664e8e9177d54de57e9321f6baf972b9113712.
+
+           -- AsusRGB Community <noreply@github.com>  $(date -R)
+          CHANGELOG
+
+          echo '3.0 (native)' > debian/source/format
+
+          cat > debian/copyright <<'COPYRIGHT'
+          Upstream: ASUS Linux / Open Gaming Collective asusctl
+          Source: https://github.com/OpenGamingCollective/asusctl
+          Commit: 15664e8e9177d54de57e9321f6baf972b9113712
+          Authors: See the upstream source and individual file notices.
+          License: MPL-2.0
+          Full upstream license: /usr/share/asusctl/LICENSE
+          Corresponding source is attached to the GitHub release.
+          Third-party dependencies retain their respective licenses.
+          COPYRIGHT
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          rules = """#!/usr/bin/make -f
+          %:
+          \tdh $@
+
+          override_dh_auto_build:
+          \t$(MAKE)
+
+          override_dh_auto_test:
+
+          override_dh_auto_install:
+          \tmkdir -p debian/asusrgb
+          \t$(MAKE) install DESTDIR=$(CURDIR)/debian/asusrgb
+          \tinstall -Dm755 debian/AsusRGB debian/asusrgb/usr/bin/AsusRGB
+
+          override_dh_installsystemd:
+          \tdh_installsystemd --no-start --no-enable
+
+          override_dh_strip:
+          \tdh_strip --no-automatic-dbgsym
+          """
+          Path("debian/rules").write_text(rules)
+          Path("debian/rules").chmod(0o755)
+          Path("debian/AsusRGB").write_text(
+              '#!/bin/sh\nexec /usr/bin/rog-control-center "$@"\n'
+          )
+          PY
+
+      - name: Build DEB
+        working-directory: upstream
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: dpkg-buildpackage -b -us -uc
+
+      - name: Collect package and corresponding source
+        run: |
+          mkdir -p dist
+          cp asusrgb_*.deb dist/
+          git -C upstream archive \
+            --format=tar.gz \
+            --prefix=asusctl-source/ \
+            HEAD > dist/asusctl-source.tar.gz
+          tar -czf dist/debian-packaging.tar.gz -C upstream debian \
+            --exclude='debian/asusrgb' \
+            --exclude='debian/.debhelper'
+          dpkg-deb --info dist/asusrgb_*.deb
+          cd dist
+          sha256sum *.deb *.tar.gz > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asusrgb-deb
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: asusrgb-deb
+          path: dist
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag \
+            --prerelease \
+            --title "AsusRGB $RELEASE_TAG — Ubuntu / Pop!_OS 24.04" \
+            --notes "Community amd64 package. Hardware validation pending. Install with sudo apt install ./asusrgb_*.deb, then run sudo systemctl restart asusd and launch AsusRGB. Pop power management is left unchanged; ASUS power-profile controls may conflict."
+WORKFLOW
+
+# Put tar exclusions before the input directory.
+python3 - <<'PY'
+from pathlib import Path
+p = Path(".github/workflows/build-deb.yml")
+s = p.read_text()
+s = s.replace(
+    "tar -czf dist/debian-packaging.tar.gz -C upstream debian \\\n"
+    "            --exclude='debian/asusrgb' \\\n"
+    "            --exclude='debian/.debhelper'",
+    "tar --exclude='debian/asusrgb' --exclude='debian/.debhelper' \\\n"
+    "            -czf dist/debian-packaging.tar.gz -C upstream debian"
+)
+p.write_text(s)
+PY
+
+git add .github/workflows/build-deb.yml &&
+git commit -m "Build and publish AsusRGB Debian packages" &&
+git push origin HEAD &&
+git tag v6.5.0-1 &&
+git push origin v6.5.0-1
