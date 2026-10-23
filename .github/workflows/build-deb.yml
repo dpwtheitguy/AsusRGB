@@ -87,7 +87,7 @@ jobs:
            -- AsusRGB Community <noreply@github.com>  $(date -R)
           CHANGELOG
 
-          echo '3.0 (native)' > debian/source/format
+          echo '3.0 (quilt)' > debian/source/format
 
           cat > debian/copyright <<'COPYRIGHT'
           Upstream: ASUS Linux / Open Gaming Collective asusctl
@@ -144,9 +144,8 @@ jobs:
             --format=tar.gz \
             --prefix=asusctl-source/ \
             HEAD > dist/asusctl-source.tar.gz
-          tar -czf dist/debian-packaging.tar.gz -C upstream debian \
-            --exclude='debian/asusrgb' \
-            --exclude='debian/.debhelper'
+          tar --exclude='debian/asusrgb' --exclude='debian/.debhelper' \
+            -czf dist/debian-packaging.tar.gz -C upstream debian
           dpkg-deb --info dist/asusrgb_*.deb
           cd dist
           sha256sum *.deb *.tar.gz > SHA256SUMS
@@ -181,25 +180,3 @@ jobs:
             --prerelease \
             --title "AsusRGB $RELEASE_TAG — Ubuntu / Pop!_OS 24.04" \
             --notes "Community amd64 package. Hardware validation pending. Install with sudo apt install ./asusrgb_*.deb, then run sudo systemctl restart asusd and launch AsusRGB. Pop power management is left unchanged; ASUS power-profile controls may conflict."
-WORKFLOW
-
-# Put tar exclusions before the input directory.
-python3 - <<'PY'
-from pathlib import Path
-p = Path(".github/workflows/build-deb.yml")
-s = p.read_text()
-s = s.replace(
-    "tar -czf dist/debian-packaging.tar.gz -C upstream debian \\\n"
-    "            --exclude='debian/asusrgb' \\\n"
-    "            --exclude='debian/.debhelper'",
-    "tar --exclude='debian/asusrgb' --exclude='debian/.debhelper' \\\n"
-    "            -czf dist/debian-packaging.tar.gz -C upstream debian"
-)
-p.write_text(s)
-PY
-
-git add .github/workflows/build-deb.yml &&
-git commit -m "Build and publish AsusRGB Debian packages" &&
-git push origin HEAD &&
-git tag v6.5.0-1 &&
-git push origin v6.5.0-1
